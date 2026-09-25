@@ -1,0 +1,108 @@
+# Codemagic CI/CD — Cooly iOS 빌드 & TestFlight 업로드
+#
+# 전제:
+#   - Codemagic Integrations에 App Store Connect API 키가 "codemagic" 이름으로 등록됨
+#   - 환경변수 그룹 ios_signing 에 CERTIFICATE_PRIVATE_KEY(base64 PEM) 존재
+#   ※ 그룹이 앱 단위였다면 Cooly 앱 설정에서 같은 그룹을 한 번 더 연결해야 함
+#
+# 앱별로 바꿀 것:
+#   - APP_STORE_APPLE_ID: App Store Connect → Cooly → 앱 정보 → Apple ID 숫자로 교체
+#     (첫 빌드는 몰라도 됨 — 조회 실패 시 0+1=1로 빌드됨)
+
+workflows:
+  ios-release:
+    name: iOS Release (TestFlight)
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    integrations:
+      # Codemagic UI에 등록된 App Store Connect API 키 이름
+      app_store_connect: codemagic
+    environment:
+      groups:
+        - cooly_signing        # Codemagic UI에서 등록: CERTIFICATE_PRIVATE_KEY (base64 PEM, Cooly 전용 새 키)
+      # CMP 1.11.1이 참조하는 UIKit 심볼은 최신 iOS SDK에만 있음
+      # → 구버전 Xcode(16.2 등)로는 링크 실패. 반드시 latest.
+      xcode: latest
+      java: 17                 # AGP 8.13 + Kotlin 2.4.10 (shared 모듈 gradle 빌드용)
+      vars:
+        XCODE_PROJECT: "iosApp/iosApp.xcodeproj"
+        XCODE_SCHEME: "iosApp"
+        BUNDLE_ID: "com.octsun.cooly"
+        APP_STORE_APPLE_ID: 6809447632
+    scripts:
+      - name: Gradle 설정 (JDK 확인)
+        script: |
+          set -e
+          java -version
+          # KMP 프레임워크는 Xcode 빌드 중 "Compile Kotlin Framework" 스크립트가 gradlew로 빌드함.
+          chmod +x ./gradlew
+
+      - name: 코드 서명 (고정 개인키로 인증서·프로파일 생성/재사용 —
+        script: |
+          set -e
+          keychain initialize
+          # Apple WWDR 중간 인증서 전 세대 임포트 → 서명 체인 완성 (90034 방지,.
+          for G in G3 G4 G5 G6 G7 G8; do
+            curl -fsSL "https://www.apple.com/certificateauthority/AppleWWDRCA${G}.cer" \
+              -o "$CM_BUILD_DIR/wwdr_${G}.cer" 2>/dev/null \
+              && keychain add-certificates --certificate "$CM_BUILD_DIR/wwdr_${G}.cer" 2>/dev/null \
+              && echo "WWDR ${G} 임포트 완료" || echo "WWDR ${G} 없음/스킵"
+          done
+          # CERTIFICATE_PRIVATE_KEY(cooly_signing 그룹)는 base64 인코딩된 PEM.
+          # fail-fast: 변수 미주입이면 여기서 바로 원인 출력하고 중단.
+          if [ -z "$CERTIFICATE_PRIVATE_KEY" ]; then
+            echo "❌ CERTIFICATE_PRIVATE_KEY 가 비어 있음."
+            echo "   Codemagic → cooly 앱 → Environment variables 에서"
+            echo "   이름 CERTIFICATE_PRIVATE_KEY / 그룹 cooly_signing / Secure 로 저장됐는지,"
+            echo "   그룹명이 yaml의 cooly_signing 과 정확히 일치하는지 확인하세요."
+            exit 1
+          fi
+          echo "키 길이: ${#CERTIFICATE_PRIVATE_KEY} (2272 근처여야 정상)"
+          printf '%s' "$CERTIFICATE_PRIVATE_KEY" | base64 --decode > "$CM_BUILD_DIR/cert_key.pem"
+          head -1 "$CM_BUILD_DIR/cert_key.pem"   # "-----BEGIN ..." 이 보여야 정상
+          # 이 고정 키로 서명. 매칭 배포 인증서 있으면 재사용, 없으면 1회 생성.
+          app-store-connect fetch-signing-files "$BUNDLE_ID" \
+            --type IOS_APP_STORE \
+            --certificate-key @file:"$CM_BUILD_DIR/cert_key.pem" \
+            --create
+          keychain add-certificates
+          xcode-project use-profiles
+
+      - name: IPA 빌드
+        script: |
+          set -e
+          # 빌드 번호를 TestFlight 최신값 +1 로 자동 증가.
+          # Apple ID 조회 실패 시(자리표시자 등) Codemagic 빌드 카운터로 폴백 — 기존
+          # TestFlight 빌드 1과의 번호 충돌을 피한다.
+          BUILD_NUMBER=$(app-store-connect get-latest-testflight-build-number "$APP_STORE_APPLE_ID" 2>/dev/null || echo "")
+          if [ -z "$BUILD_NUMBER" ]; then BUILD_NUMBER=$PROJECT_BUILD_NUMBER; fi
+          AGVTOOL_NEW=$(($BUILD_NUMBER + 1))
+          echo "CURRENT_PROJECT_VERSION=$AGVTOOL_NEW"
+          xcode-project build-ipa \
+            --project "$XCODE_PROJECT" \
+            --scheme "$XCODE_SCHEME" \
+            --config Release \
+            --disable-xcpretty \
+            --archive-xcargs "CURRENT_PROJECT_VERSION=$AGVTOOL_NEW"
+
+      - name: 서명 진단 (실패 시 90034 원인 판별용)
+        script: |
+          echo "===== 키체인 코드사이닝 아이덴티티 ====="
+          security find-identity -v -p codesigning || true
+          echo "===== IPA 서명 체인 확인 ====="
+          IPA=$(ls "$CM_BUILD_DIR"/build/ios/ipa/*.ipa 2>/dev/null | head -1)
+          echo "IPA=$IPA"
+          if [ -n "$IPA" ]; then
+            D=$(mktemp -d); unzip -q "$IPA" -d "$D"
+            APP=$(ls -d "$D"/Payload/*.app | head -1)
+            codesign -dvvv "$APP" 2>&1 | grep -iE "Authority|TeamIdentifier|Signature|^Identifier" || true
+          fi
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+      - $HOME/Library/Developer/Xcode/DerivedData/**/Build/**/*.app.dSYM.zip
+    publishing:
+      app_store_connect:
+        auth: integration
+        # 업로드만 수행. 업로드된 빌드는 App Store Connect 버전 페이지에서 선택해 심사 제출.
+        submit_to_testflight: false

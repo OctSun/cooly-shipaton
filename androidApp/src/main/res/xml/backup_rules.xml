@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Legacy (pre-Android 12) auto-backup rules: only back up the app's preferences. -->
+<full-backup-content>
+    <include domain="sharedpref" path="cooly_prefs.xml" />
+</full-backup-content>

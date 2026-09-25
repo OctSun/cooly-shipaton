@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Cooly</string>
+    <string name="widget_description">Current heat &amp; air-quality risk at a glance.</string>
+</resources>

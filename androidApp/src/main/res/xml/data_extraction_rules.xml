@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 12+ backup/transfer rules. Favorites (prefs) may be backed up; nothing sensitive. -->
+<data-extraction-rules>
+    <cloud-backup>
+        <include domain="sharedpref" path="cooly_prefs.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <include domain="sharedpref" path="cooly_prefs.xml" />
+    </device-transfer>
+</data-extraction-rules>

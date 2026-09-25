@@ -1,0 +1,11 @@
+TEAM_ID=2Y3KG5ZDR7
+
+PRODUCT_NAME=Cooly
+PRODUCT_BUNDLE_IDENTIFIER=com.octsun.cooly
+
+CURRENT_PROJECT_VERSION=1
+MARKETING_VERSION=1.2.0
+
+// Google Maps iOS SDK key (Maps SDK for iOS). Provide your own; keep it out of version control.
+// Leave empty to run with the CanvasMap fallback.
+GMAPS_API_KEY=
